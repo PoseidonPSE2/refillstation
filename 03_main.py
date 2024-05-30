@@ -26,10 +26,18 @@ GPIO.setup(button_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
 # Variable to block reading while tag read being proccessed
 card_read = False
 
+#-------------------- Station Configs --------------------
+
+stationID = 2
+buttonDefaultWaterType = "Tap"
+
 #-------------------- Backend Configs --------------------
 
 # Define the headers and the endpoint (specifying that the content type is JSON)
-local_endpoint = "http://localhost:8080/"
+endpoint = "https://poseidon-backend.fly.dev"
+NFC_preferences = endpoint + "/bottles/preferences/"
+water_transactions = endpoint + "/water_transactions"
+
 headers = {"Content-Type": "application/json"}
 
 #-------------------- Helper functions --------------------
@@ -56,20 +64,23 @@ def button_callback(channel):
         GPIO.output(led_pin,GPIO.LOW)
         logger.debug("Button pressed for %i" % elapsed)
         #Inform Backend
-        post_water_given("", elapsed)
+        post_water_transaction("", "", buttonDefaultWaterType, elapsed)
 
 # To-Do add station and user id
-def post_water_given(id, seconds):
+def post_water_transaction(bottleID, userID, waterType, seconds):
     ml = str(seconds * 100)
-    post_endpoint = local_endpoint + "add"
+
     body_object = {
-        "id": id,
-        "ml": ml,
-        "waterType": "still"
+        "station_id": stationID,
+        "bottle_id": bottleID,
+        "user_id": userID,
+        "volume": ml,
+        "water_type": waterType
     }
+
     body_json = json.dumps(body_object)
 
-    response = requests.post(url=post_endpoint, data=body_json, headers=headers)
+    response = requests.post(url=water_transactions, data=body_json, headers=headers)
     logger.debug(response)
 
 #-------------------- Init --------------------
@@ -111,21 +122,19 @@ try:
         if card_read == True:
             tag_id = ':'.join(['{:02X}'.format(byte) for byte in uid])
             logger.info('Found RFID-Tag with UID: %s' % tag_id)
-            
-            body_object = {
-                "ID": tag_id
-            }
-            body_json = json.dumps(body_object)
+
+            request_endpoint = NFC_preferences + tag_id
 
             # Send the get request with the JSON data
-            response = requests.post(url=local_endpoint, data=body_json, headers=headers)
+            response = requests.get(url=request_endpoint)
             
             try:
                 json_response = json.loads(response.text)
                 # Access the properties
-                # user_id = json_response['User_ID'] -> Not yet in backend
-                milliliter = int(json_response['ml'])
-                waterType = json_response['waterType']
+                bottleID = json_response['id']
+                userID = json_response['user_id']
+                fillVolume = int(json_response['fill_volume'])
+                waterType = json_response['water_type']
 
                 # Print the response
                 logger.info("Data found for id %s %s" % (tag_id, json_response))
@@ -133,16 +142,16 @@ try:
                 logger.info('Water delivery started')
 
                 # More or less one second each 100 ml
-                time_on = milliliter / 100
+                time_on = fillVolume / 100
                 turn_on_led_for(time_on)
 
                 logger.info('Water delivery finished')
 
                 #Inform Backend
-                post_water_given(tag_id, time_on)
+                post_water_transaction(bottleID, userID, waterType, time_on)
 
             except:
-                logger.error("server response: %s" % response)
+                logger.error("server response: %s: %s" % (response, response.text))
 
             card_read = False
 
