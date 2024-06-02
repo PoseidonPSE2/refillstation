@@ -26,7 +26,7 @@ MINERAL_WATER = "mineral"
 STATION_ID = 2
 
 # Calculated speed of pump ml/s
-PUMP_SPEED = 200
+PUMP_SPEED = 38
 
 # Time between reading RFID and starting pump
 TIMEOUT_PUT_BOTTLE = 3
