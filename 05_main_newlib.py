@@ -1,5 +1,6 @@
 import json
 from math import floor
+import re
 import requests
 import time
 import logging
@@ -7,27 +8,54 @@ import logging
 from gpiozero import LED, Button
 
 from pn532 import *
+import pn532.pn532 as nfc
+
+#-------------------- Constants --------------------
+
+# Pin numbers in Pi
+TAP_RELAIS_PIN = 4
+TAP_BUTTON_PIN = 17
+GREEN_LED_PIN = 23
+BLUE_LED_PIN = 27
+
+# Water types
+TAP_WATER = "tap"
+MINERAL_WATER = "mineral"
+
+# Should be correctly set for each station
+STATION_ID = 2
+
+# Calculated speed of pump ml/s
+PUMP_SPEED = 200
+
+# Time between reading RFID and starting pump
+TIMEOUT_PUT_BOTTLE = 3
+
+# Key to encrypt information in NFC
+NFC_KEY = b'\xFF\xFF\xFF\xFF\xFF\xFF'
+
+# Define the headers and the endpoint (specifying that the content type is JSON)
+ENDPOINT_BASE = "https://poseidon-backend.fly.dev"
+ENDPOINT_BOTTLE_PREF = ENDPOINT_BASE + "/bottles/preferences/"
+ENDPOINT_WATER_TRANS = ENDPOINT_BASE + "/water_transactions"
+
+REQUEST_HEADERS = {"Content-Type": "application/json"}
 
 #-------------------- Hardware Configs --------------------
-# Pin numbers in Pi
-relais_pin = 4
-button_pin = 17
-green_led_pin = 23
-blue_led_pin = 27
 
 # Help variables to track button pressed time
 button_start = time.time()
 button_end = time.time()
 
 # Pin definition
-button = Button(button_pin)
-green_led = LED(green_led_pin)
-blue_led = LED(blue_led_pin)
-pump = LED(relais_pin)
+tap_button = Button(TAP_BUTTON_PIN)
+green_led = LED(GREEN_LED_PIN)
+blue_led = LED(BLUE_LED_PIN)
+tap_pump = LED(TAP_RELAIS_PIN)
 
 # Blue led shoud indicate when the button is pressed
-button.when_pressed = blue_led.on
-button.when_released = blue_led.off
+tap_button.when_pressed = blue_led.on
+tap_button.when_released = blue_led.off
 
 # Variable to block reading while tag read being proccessed
 card_read = False
@@ -38,38 +66,50 @@ pressed_time = 0
 # Variable to hold the duration the button was held
 hold_duration = 0
 
-#-------------------- Station Configs --------------------
-
-# Should be correctly set for each station
-stationID = 2
-buttonDefaultWaterType = "Tap"
-pumpSpeed = 200
-timeToPutBottle = 3
-
-#-------------------- Backend Configs --------------------
-
-# Define the headers and the endpoint (specifying that the content type is JSON)
-endpoint = "https://poseidon-backend.fly.dev"
-NFC_preferences = endpoint + "/bottles/preferences/"
-water_transactions = endpoint + "/water_transactions"
-
-headers = {"Content-Type": "application/json"}
-
 #-------------------- Helper functions --------------------
+
+def extract_text(data):
+    # Find the start and end indices of the desired text
+    start_index = data.find(b"\x02en") + len(b"\x02en")
+    end_index = data.find(b"\xfe\x00")
+    # Extract the text between the start and end indices
+    extracted_text = data[start_index:end_index].decode('utf-8', errors='replace')
+    printable_text = re.sub(r'[^ -~]', '', extracted_text)
+    return printable_text
+
+def read_nfc_content(starting_block, ending_block):
+    content = b''
+    # First 3 blocks not relevant
+    for i in range(starting_block, ending_block):
+        # Skip the block headers
+        if i % 4 == 3:
+            continue
+        try:
+            # Authenticate with the tag
+            pn532.mifare_classic_authenticate_block(uid, block_number=i, key_number=nfc.MIFARE_CMD_AUTH_B, key=NFC_KEY)
+            
+            # Read block data
+            block_data = pn532.mifare_classic_read_block(i)
+
+            content += block_data
+        except nfc.PN532Error as e:
+            logger.error(e.errmsg)
+
+    return extract_text(content)
 
 def turn_off_all():
     green_led.off()
     blue_led.off()
-    pump.off()
+    tap_pump.off()
 
 def turn_on_water_pump_for(seconds):
     blue_led.on()
-    pump.on()
+    tap_pump.on()
 
     time.sleep(seconds)
     
     blue_led.off()
-    pump.off() 
+    tap_pump.off() 
     return True
 
 def blink_led_n_times(n, led):
@@ -80,33 +120,33 @@ def blink_led_n_times(n, led):
         time.sleep(0.2)
     return True
 
-def button_pressed():
+def tap_button_pressed():
     global pressed_time
     pressed_time = time.time()
     blue_led.on()
-    pump.on()
+    tap_pump.on()
 
-def button_released():
+def tap_button_released():
     global hold_duration
     hold_duration = time.time() - pressed_time
     blue_led.off()
-    pump.off()
-    logger.info(f"Button released! Held for {hold_duration:.2f} seconds.")
-    post_water_transaction(buttonDefaultWaterType, hold_duration, True)
+    tap_pump.off()
+    logger.info(f"Tap water button released! Held for {hold_duration:.2f} seconds.")
+    post_water_transaction(TAP_WATER, hold_duration, True)
 
 def post_water_transaction(waterType, seconds, guest=False, bottleID=0, userID=0):
-    ml = floor(seconds * pumpSpeed)
+    ml = floor(seconds * PUMP_SPEED)
 
     if guest:
         body_object = {
-        "stationId": stationID,
+        "stationId": STATION_ID,
         "volume": ml,
         "waterType": waterType,
         "guest": True
         }
     else:
         body_object = {
-            "stationId": stationID,
+            "stationId": STATION_ID,
             "bottleId": bottleID,
             "userId": userID,
             "volume": ml,
@@ -115,9 +155,9 @@ def post_water_transaction(waterType, seconds, guest=False, bottleID=0, userID=0
 
     body_json = json.dumps(body_object)
 
-    logger.debug("Posting object: %s, to endpoint: %s", body_json, water_transactions)
+    logger.debug("Posting object: %s, to endpoint: %s", body_json, ENDPOINT_WATER_TRANS)
 
-    response = requests.post(url=water_transactions, data=body_json, headers=headers)
+    response = requests.post(url=ENDPOINT_WATER_TRANS, data=body_json, headers=REQUEST_HEADERS)
     logger.debug(response)
 
 #-------------------- Init --------------------
@@ -125,8 +165,8 @@ def post_water_transaction(waterType, seconds, guest=False, bottleID=0, userID=0
 turn_off_all()
 
 # Attach the functions to the button's events
-button.when_pressed = button_pressed
-button.when_released = button_released
+tap_button.when_pressed = tap_button_pressed
+tap_button.when_released = tap_button_released
 
 # Turn on the led for knowing the programm is running
 green_led.on()
@@ -146,7 +186,6 @@ ic, ver, rev, support = pn532.get_firmware_version()
 message = 'Found PN532 with firmware version: {0}.{1}'.format(ver, rev)
 logger.info(message)
 
-
 # Configure PN532 to communicate with MiFare cards
 pn532.SAM_configuration()
 
@@ -163,19 +202,22 @@ try:
             card_read = True
 
         if card_read == True:
+            # Read the NFC-ID found in the memory
+            nfc_content = read_nfc_content(4, 6)
+            tag_id = ':'.join(['{:02X}'.format(byte) for byte in uid])
+            logger.debug('RFID-Tag with UID: %s, RFID-Tag content: %s', tag_id, nfc_content)
+
             # Signal something was read
             blink_led_n_times(3, blue_led)
 
-            tag_id = ':'.join(['{:02X}'.format(byte) for byte in uid])
-            logger.info('Found RFID-Tag with UID: %s' % tag_id)
-
-            request_endpoint = NFC_preferences + tag_id
+            request_endpoint = ENDPOINT_BOTTLE_PREF + nfc_content
 
             # Send the get request with the JSON data
             response = requests.get(url=request_endpoint)
             
             try:
                 json_response = json.loads(response.text)
+                
                 # Access the properties
                 bottleID = json_response['id']
                 userID = json_response['user_id']
@@ -183,21 +225,22 @@ try:
                 waterType = json_response['water_type']
 
                 # Print the response
-                logger.info("Data found for id %s %s" % (tag_id, json_response))
+                logger.info("Data found for id %s %s" % (nfc_content, json_response))
 
-                # Wait for the bottle to be placed
-                time.sleep(timeToPutBottle)
+                if waterType.lower() == "tap":
+                    # Wait for the bottle to be placed
+                    time.sleep(TIMEOUT_PUT_BOTTLE)
 
-                logger.info('Water delivery started')
+                    logger.info('Tap water delivery started')
 
-                # More or less one second each 100 ml
-                time_on = fillVolume / pumpSpeed
-                turn_on_water_pump_for(time_on)
+                    # More or less one second each 100 ml
+                    time_on = fillVolume / PUMP_SPEED
+                    turn_on_water_pump_for(time_on)
 
-                logger.info('Water delivery finished')
+                    logger.info('Tap water delivery finished')
 
-                #Inform Backend
-                post_water_transaction(waterType, time_on, False, bottleID, userID)
+                    #Inform Backend
+                    post_water_transaction(waterType, time_on, False, bottleID, userID)
 
             except:
                 logger.error("server response: %s: %s" % (response, response.text))
