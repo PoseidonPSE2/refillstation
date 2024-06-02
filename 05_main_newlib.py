@@ -1,40 +1,49 @@
-import RPi.GPIO as GPIO
 import json
+from math import floor
 import requests
 import time
 import logging
+
+from gpiozero import LED, Button
 
 from pn532 import *
 
 #-------------------- Hardware Configs --------------------
 # Pin numbers in Pi
-green_led_pin = 23
+relais_pin = 4
 button_pin = 17
-relais_pin = 27
-blue_led_pin = 22
+green_led_pin = 23
+blue_led_pin = 27
 
 # Help variables to track button pressed time
 button_start = time.time()
 button_end = time.time()
 
-# GPIO configurations
-GPIO.setmode(GPIO.BCM)
-GPIO.setwarnings(False)
-
 # Pin definition
-GPIO.setup(green_led_pin, GPIO.OUT)
-GPIO.setup(relais_pin, GPIO.OUT)
-GPIO.setup(blue_led_pin, GPIO.OUT)
-GPIO.setup(button_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+button = Button(button_pin)
+green_led = LED(green_led_pin)
+blue_led = LED(blue_led_pin)
+pump = LED(relais_pin)
+
+# Blue led shoud indicate when the button is pressed
+button.when_pressed = blue_led.on
+button.when_released = blue_led.off
 
 # Variable to block reading while tag read being proccessed
 card_read = False
+
+# Variable to hold the time when the button is pressed
+pressed_time = 0
+
+# Variable to hold the duration the button was held
+hold_duration = 0
 
 #-------------------- Station Configs --------------------
 
 # Should be correctly set for each station
 stationID = 2
 buttonDefaultWaterType = "Tap"
+pumpSpeed = 200
 timeToPutBottle = 3
 
 #-------------------- Backend Configs --------------------
@@ -49,71 +58,64 @@ headers = {"Content-Type": "application/json"}
 #-------------------- Helper functions --------------------
 
 def turn_off_all():
-    turn_off_gpio(blue_led_pin)
-    turn_off_gpio(green_led_pin)
-    turn_off_gpio(relais_pin)
+    green_led.off()
+    blue_led.off()
+    pump.off()
 
-def turn_on_water_pump_for(led, relais, seconds):
-    if GPIO.input(led) == GPIO.LOW and GPIO.input(relais) == GPIO.LOW:
-        GPIO.output(led,GPIO.HIGH)
-        GPIO.output(relais,GPIO.HIGH)
-        
-        time.sleep(seconds)
-        
-        GPIO.output(led,GPIO.LOW)
-        GPIO.output(relais,GPIO.LOW)
+def turn_on_water_pump_for(seconds):
+    blue_led.on()
+    pump.on()
+
+    time.sleep(seconds)
+    
+    blue_led.off()
+    pump.off() 
     return True
 
 def blink_led_n_times(n, led):
     for _ in range(n):
-        GPIO.output(led, GPIO.HIGH)
+        led.on()
         time.sleep(0.2)
-        GPIO.output(led, GPIO.LOW)
+        led.off()
         time.sleep(0.2)
     return True
 
-def turn_on_gpio(led):
-    if GPIO.input(led) == GPIO.LOW:
-        GPIO.output(led,GPIO.HIGH)
-    return True
+def button_pressed():
+    global pressed_time
+    pressed_time = time.time()
+    blue_led.on()
+    pump.on()
 
-def turn_off_gpio(led):
-    if GPIO.input(led) == GPIO.HIGH:
-        GPIO.output(led,GPIO.LOW)
-    return True
+def button_released():
+    global hold_duration
+    hold_duration = time.time() - pressed_time
+    blue_led.off()
+    pump.off()
+    logger.info(f"Button released! Held for {hold_duration:.2f} seconds.")
+    post_water_transaction(buttonDefaultWaterType, hold_duration, True)
 
-def button_callback(channel):
-    global button_start, button_end
-    if GPIO.input(button_pin) == 1:
-        # Start timer
-        button_start = time.time()
-        # Turn on LED
-        GPIO.output(blue_led_pin, GPIO.HIGH)
-        GPIO.output(relais_pin, GPIO.HIGH)
+def post_water_transaction(waterType, seconds, guest=False, bottleID=0, userID=0):
+    ml = floor(seconds * pumpSpeed)
 
-    if GPIO.input(button_pin) == 0:
-        # End timer and calculate elapsed
-        button_end = time.time()
-        elapsed = button_end - button_start
-        # Turn off LED
-        GPIO.output(blue_led_pin, GPIO.LOW)
-        GPIO.output(relais_pin, GPIO.LOW)
-        logger.debug("Button pressed for %i" % elapsed)
-        #Inform Backend
-        post_water_transaction("", "", buttonDefaultWaterType, elapsed)
-
-def post_water_transaction(bottleID, userID, waterType, seconds):
-    ml = str(seconds * 100)
-
-    body_object = {
-        "station_id": stationID,
-        "bottle_id": bottleID,
-        "user_id": userID,
+    if guest:
+        body_object = {
+        "stationId": stationID,
         "volume": ml,
-        "waterType": waterType
-    }
+        "waterType": waterType,
+        "guest": True
+        }
+    else:
+        body_object = {
+            "stationId": stationID,
+            "bottleId": bottleID,
+            "userId": userID,
+            "volume": ml,
+            "waterType": waterType
+        }
 
     body_json = json.dumps(body_object)
+
+    logger.debug("Posting object: %s, to endpoint: %s", body_json, water_transactions)
 
     response = requests.post(url=water_transactions, data=body_json, headers=headers)
     logger.debug(response)
@@ -122,8 +124,12 @@ def post_water_transaction(bottleID, userID, waterType, seconds):
 
 turn_off_all()
 
+# Attach the functions to the button's events
+button.when_pressed = button_pressed
+button.when_released = button_released
+
 # Turn on the led for knowing the programm is running
-turn_on_gpio(green_led_pin)
+green_led.on()
 
 # Configure logging
 logging.basicConfig(
@@ -133,9 +139,6 @@ logging.basicConfig(
 
 # Create a logger"
 logger = logging.getLogger(__name__)
-
-# Set the callback for button pressed
-GPIO.add_event_detect(button_pin, GPIO.BOTH, callback=button_callback, bouncetime=200)
 
 # PN532 Config
 pn532 = PN532_I2C(debug=False, reset=20, req=16)
@@ -161,7 +164,7 @@ try:
 
         if card_read == True:
             # Signal something was read
-            blink_led_n_times(3, blue_led_pin)
+            blink_led_n_times(3, blue_led)
 
             tag_id = ':'.join(['{:02X}'.format(byte) for byte in uid])
             logger.info('Found RFID-Tag with UID: %s' % tag_id)
@@ -188,13 +191,13 @@ try:
                 logger.info('Water delivery started')
 
                 # More or less one second each 100 ml
-                time_on = fillVolume / 300
-                turn_on_water_pump_for(blue_led_pin, relais_pin, time_on)
+                time_on = fillVolume / pumpSpeed
+                turn_on_water_pump_for(time_on)
 
                 logger.info('Water delivery finished')
 
                 #Inform Backend
-                post_water_transaction(bottleID, userID, waterType, time_on)
+                post_water_transaction(waterType, time_on, False, bottleID, userID)
 
             except:
                 logger.error("server response: %s: %s" % (response, response.text))
@@ -203,11 +206,8 @@ try:
 
 except KeyboardInterrupt:
     logger.warning("....Program terminated by user...")
-    turn_off_gpio(green_led_pin)
-    GPIO.cleanup()
 finally:
     turn_off_all()
-    GPIO.cleanup()
 
 
 
