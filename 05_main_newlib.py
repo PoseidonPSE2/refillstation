@@ -1,14 +1,18 @@
 import json
-from math import floor
+import random
 import re
 import requests
 import time
 import logging
 
-from gpiozero import LED, Button
-
-from pn532 import *
 import pn532.pn532 as nfc
+import paho.mqtt.client as paho
+
+from paho import mqtt
+from gpiozero import LED, Button
+from math import floor
+from pn532 import *
+
 
 #-------------------- Constants --------------------
 
@@ -41,6 +45,13 @@ ENDPOINT_WATER_TRANS = ENDPOINT_BASE + "/water_transactions"
 
 REQUEST_HEADERS = {"Content-Type": "application/json"}
 
+MQTT_BROKER_ADRESS = "fe265cd34caa4bfdb65ebf91b76283a1.s1.eu.hivemq.cloud"
+MQTT_BROKER_PORT = 8883
+MQTT_BASE_TOPIC = "AppData/User-"
+
+MQTT_BROKER_USER = "RefillStation"
+MQTT_BROKER_PW = "Poseidon_refill1"
+
 #-------------------- Hardware Configs --------------------
 
 # Help variables to track button pressed time
@@ -67,6 +78,18 @@ pressed_time = 0
 hold_duration = 0
 
 #-------------------- Helper functions --------------------
+
+# setting callbacks for different events to see if it works, print the message etc.
+def on_connect(client, userdata, flags, rc, properties=None):
+    logger.info("CONN ACK received with code %s." % rc)
+
+# with this callback you can see if your publish was successful
+def on_publish(client, userdata, mid, properties=None):
+    logger.debug("mid: " + str(mid))
+
+# print message, useful for checking if it was successful
+def on_message(client, userdata, msg):
+    logger.debug(msg.topic + " " + str(msg.qos) + " " + str(msg.payload))
 
 def extract_text(data):
     # Find the start and end indices of the desired text
@@ -160,6 +183,26 @@ def post_water_transaction(waterType, seconds, guest=False, bottleID=0, userID=0
     response = requests.post(url=ENDPOINT_WATER_TRANS, data=body_json, headers=REQUEST_HEADERS)
     logger.debug(response)
 
+
+#-------------------- MQTT Init --------------------
+
+# using MQTT version 5 here, for 3.1.1: MQTTv311, 3.1: MQTTv31
+# userdata is user defined data of any type, updated by user_data_set()
+# client_id is the given name of the client
+client = paho.Client(client_id="", userdata=None, protocol=paho.MQTTv5)
+client.on_connect = on_connect
+
+# enable TLS for secure connection
+client.tls_set(tls_version=mqtt.client.ssl.PROTOCOL_TLS)
+# set username and password
+client.username_pw_set(MQTT_BROKER_USER, MQTT_BROKER_PW)
+# connect to HiveMQ Cloud on port 8883 (default for MQTT)
+client.connect(MQTT_BROKER_ADRESS, MQTT_BROKER_PORT)
+
+# setting callbacks, use separate functions like above for better visibility
+client.on_message = on_message
+client.on_publish = on_publish
+
 #-------------------- Init --------------------
 
 turn_off_all()
@@ -231,24 +274,33 @@ try:
                     # Wait for the bottle to be placed
                     time.sleep(TIMEOUT_PUT_BOTTLE)
 
-                    logger.info('Tap water delivery started')
-
+                    
+                    # Post to a topic based on the user id
+                    mqttTopic = MQTT_BASE_TOPIC + str(userID)
+                    
                     # More or less one second each 100 ml
-                    time_on = fillVolume / PUMP_SPEED
-                    turn_on_water_pump_for(time_on)
+                    timeOn = round(fillVolume / PUMP_SPEED, 2)
 
-                    logger.info('Tap water delivery finished')
+                    message = f"Tap water delivery started for {fillVolume} ml ({timeOn} seconds)"
+                    logger.info(message)
+                    client.publish(mqttTopic, payload=message, qos=1)
+                    
+                    turn_on_water_pump_for(timeOn)
 
+                    message = f"Tap water delivery finished for {fillVolume} ml ({timeOn} seconds)"
+                    logger.info(message)
+                    client.publish(mqttTopic, payload=message, qos=1)
+                    
                     #Inform Backend
-                    post_water_transaction(waterType, time_on, False, bottleID, userID)
+                    post_water_transaction(waterType, timeOn, False, bottleID, userID)
 
-            except:
-                logger.error("server response: %s: %s" % (response, response.text))
+            except Exception as e:
+                logger.error(f"An error occurred: {e}")
 
             card_read = False
 
 except KeyboardInterrupt:
-    logger.warning("....Program terminated by user...")
+    logger.warning("....Programm terminated by user...")
 finally:
     turn_off_all()
 
