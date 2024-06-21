@@ -1,6 +1,6 @@
 import json
-import random
 import re
+import sys
 import requests
 import time
 import logging
@@ -13,71 +13,12 @@ from gpiozero import LED, Button
 from math import floor
 from pn532 import *
 
-
-#-------------------- Constants --------------------
-
-# Pin numbers in Pi
-TAP_RELAIS_PIN = 4
-TAP_BUTTON_PIN = 17
-GREEN_LED_PIN = 23
-BLUE_LED_PIN = 27
-
-# Water types
-TAP_WATER = "tap"
-MINERAL_WATER = "mineral"
-
-# Should be correctly set for each station
-STATION_ID = 2
-
-# Calculated speed of pump ml/s
-PUMP_SPEED = 38
-
-# Time between reading RFID and starting pump
-TIMEOUT_PUT_BOTTLE = 3
-
-# Key to encrypt information in NFC
-NFC_KEY = b'\xFF\xFF\xFF\xFF\xFF\xFF'
-
-# Define the headers and the endpoint (specifying that the content type is JSON)
-ENDPOINT_BASE = "https://poseidon-backend.fly.dev"
-ENDPOINT_BOTTLE_PREF = ENDPOINT_BASE + "/bottles/preferences/"
-ENDPOINT_WATER_TRANS = ENDPOINT_BASE + "/water_transactions"
-
-REQUEST_HEADERS = {"Content-Type": "application/json"}
-
-MQTT_BROKER_ADRESS = "fe265cd34caa4bfdb65ebf91b76283a1.s1.eu.hivemq.cloud"
-MQTT_BROKER_PORT = 8883
-MQTT_BASE_TOPIC = "AppData/User-"
-
-MQTT_BROKER_USER = "RefillStation"
-MQTT_BROKER_PW = "Poseidon_refill1"
-
-#-------------------- Hardware Configs --------------------
-
-# Help variables to track button pressed time
-button_start = time.time()
-button_end = time.time()
-
-# Pin definition
-tap_button = Button(TAP_BUTTON_PIN)
-green_led = LED(GREEN_LED_PIN)
-blue_led = LED(BLUE_LED_PIN)
-tap_pump = LED(TAP_RELAIS_PIN)
-
-# Blue led shoud indicate when the button is pressed
-tap_button.when_pressed = blue_led.on
-tap_button.when_released = blue_led.off
-
-# Variable to block reading while tag read being proccessed
-card_read = False
-
-# Variable to hold the time when the button is pressed
-pressed_time = 0
-
-# Variable to hold the duration the button was held
-hold_duration = 0
-
 #-------------------- Helper functions --------------------
+
+def initiate_panic():
+    logger.info("Panic exit triggered.")
+    turn_off_all()
+    sys.exit()
 
 # setting callbacks for different events to see if it works, print the message etc.
 def on_connect(client, userdata, flags, rc, properties=None):
@@ -121,59 +62,75 @@ def read_nfc_content(starting_block, ending_block):
     return extract_text(content)
 
 def turn_off_all():
-    green_led.off()
-    blue_led.off()
-    tap_pump.off()
+    WHITE_LED.off()
+    BLUE_LED.off()
+    BLUE_PUMP.off()
+    GREEN_LED.off()
+    GREEN_PUMP.off()
 
-def turn_on_water_pump_for(seconds):
-    blue_led.on()
-    tap_pump.on()
+def turn_on_water_pump_for(led, pump, seconds):
+    led.on()
+    pump.on()
 
     time.sleep(seconds)
     
-    blue_led.off()
-    tap_pump.off() 
+    led.off()
+    pump.off() 
     return True
 
 def blink_led_n_times(n, led):
     for _ in range(n):
-        led.on()
-        time.sleep(0.2)
         led.off()
+        time.sleep(0.2)
+        led.on()
         time.sleep(0.2)
     return True
 
-def tap_button_pressed():
-    global pressed_time
-    pressed_time = time.time()
-    blue_led.on()
-    tap_pump.on()
+def green_button_pressed():
+    global green_pressed_time
+    green_pressed_time = time.time()
+    GREEN_LED.on()
+    GREEN_PUMP.on()
 
-def tap_button_released():
-    global hold_duration
-    hold_duration = time.time() - pressed_time
-    blue_led.off()
-    tap_pump.off()
-    logger.info(f"Tap water button released! Held for {hold_duration:.2f} seconds.")
-    post_water_transaction(TAP_WATER, hold_duration, True)
+def green_button_released():
+    global green_hold_duration
+    green_hold_duration = time.time() - green_pressed_time
+    GREEN_LED.off()
+    GREEN_PUMP.off()
+    logger.info(f"Tap water button released! Held for {green_hold_duration:.2f} seconds.")
+    post_water_transaction(TAP_WATER, green_hold_duration, True)
+
+def blue_button_pressed():
+    global blue_pressed_time
+    blue_pressed_time = time.time()
+    BLUE_LED.on()
+    BLUE_PUMP.on()
+
+def blue_button_released():
+    global blue_hold_duration
+    blue_hold_duration = time.time() - blue_pressed_time
+    BLUE_LED.off()
+    BLUE_PUMP.off()
+    logger.info(f"Mineral water button released! Held for {blue_hold_duration:.2f} seconds.")
+    post_water_transaction(MINERAL_WATER, blue_hold_duration, True)
 
 def post_water_transaction(waterType, seconds, guest=False, bottleID=0, userID=0):
     ml = floor(seconds * PUMP_SPEED)
 
     if guest:
         body_object = {
-        "stationId": STATION_ID,
+        "station_id": STATION_ID,
         "volume": ml,
-        "waterType": waterType,
+        "water_type": waterType,
         "guest": True
         }
     else:
         body_object = {
-            "stationId": STATION_ID,
-            "bottleId": bottleID,
-            "userId": userID,
+            "station_id": STATION_ID,
+            "bottle_id": bottleID,
+            "user_id": userID,
             "volume": ml,
-            "waterType": waterType
+            "water_type": waterType
         }
 
     body_json = json.dumps(body_object)
@@ -183,6 +140,78 @@ def post_water_transaction(waterType, seconds, guest=False, bottleID=0, userID=0
     response = requests.post(url=ENDPOINT_WATER_TRANS, data=body_json, headers=REQUEST_HEADERS)
     logger.debug(response)
 
+
+
+#-------------------- Constants --------------------
+
+# Should be correctly set for each station
+STATION_ID = 2
+
+# Calculated speed of pump ml/s
+PUMP_SPEED = 38
+
+# Time between reading RFID and starting pump
+TIMEOUT_PUT_BOTTLE = 3
+
+# Pi gpio numberin
+WHITE_LED_PIN = 23
+PANIC_BUTTON_PIN = 24
+
+BLUE_PUMP_PIN = 26
+BLUE_BUTTON_PIN = 6
+BLUE_LED_PIN = 27
+
+GREEN_PUMP_PIN = 16
+GREEN_BUTTON_PIN = 5
+GREEN_LED_PIN = 22
+
+# Water types
+TAP_WATER = "tap"
+MINERAL_WATER = "mineral"
+
+# Key to encrypt information in NFC
+NFC_KEY = b'\xFF\xFF\xFF\xFF\xFF\xFF'
+
+# Define the headers and the endpoint (specifying that the content type is JSON)
+ENDPOINT_BASE = "https://poseidon-backend.fly.dev"
+ENDPOINT_BOTTLE_PREF = ENDPOINT_BASE + "/bottles/preferences/"
+ENDPOINT_WATER_TRANS = ENDPOINT_BASE + "/water_transactions"
+
+REQUEST_HEADERS = {"Content-Type": "application/json"}
+
+MQTT_BROKER_ADRESS = "fe265cd34caa4bfdb65ebf91b76283a1.s1.eu.hivemq.cloud"
+MQTT_BROKER_PORT = 8883
+MQTT_BASE_TOPIC = "AppData/User-"
+
+MQTT_BROKER_USER = "RefillStation"
+MQTT_BROKER_PW = "Poseidon_refill1"
+
+#-------------------- Hardware Configs --------------------
+
+# Pin definition
+WHITE_LED = LED(WHITE_LED_PIN)
+PANIC_BUTTON = Button(PANIC_BUTTON_PIN)
+
+BLUE_BUTTON = Button(BLUE_BUTTON_PIN)
+BLUE_LED = LED(BLUE_LED_PIN)
+BLUE_PUMP = LED(BLUE_PUMP_PIN, active_high=False)
+
+GREEN_BUTTON = Button(GREEN_BUTTON_PIN)
+GREEN_LED = LED(GREEN_LED_PIN)
+GREEN_PUMP = LED(GREEN_PUMP_PIN, active_high=False)
+
+# Button behavior definition
+PANIC_BUTTON.when_pressed = initiate_panic
+
+# Attach the functions to the button's events
+BLUE_BUTTON.when_pressed = blue_button_pressed
+BLUE_BUTTON.when_released = blue_button_released
+
+GREEN_BUTTON.when_pressed = green_button_pressed
+GREEN_BUTTON.when_released = green_button_released
+
+# Variable to block reading while tag read being proccessed
+card_read = False
 
 #-------------------- MQTT Init --------------------
 
@@ -207,12 +236,8 @@ client.on_publish = on_publish
 
 turn_off_all()
 
-# Attach the functions to the button's events
-tap_button.when_pressed = tap_button_pressed
-tap_button.when_released = tap_button_released
-
 # Turn on the led for knowing the programm is running
-green_led.on()
+WHITE_LED.on()
 
 # Configure logging
 logging.basicConfig(
@@ -251,7 +276,7 @@ try:
             logger.debug('RFID-Tag with UID: %s, RFID-Tag content: %s', tag_id, nfc_content)
 
             # Signal something was read
-            blink_led_n_times(3, blue_led)
+            blink_led_n_times(3, WHITE_LED)
 
             request_endpoint = ENDPOINT_BOTTLE_PREF + nfc_content
 
@@ -270,24 +295,37 @@ try:
                 # Print the response
                 logger.info("Data found for id %s %s" % (nfc_content, json_response))
 
-                if waterType.lower() == "tap":
-                    # Wait for the bottle to be placed
-                    time.sleep(TIMEOUT_PUT_BOTTLE)
+                # Wait for the bottle to be placed
+                time.sleep(TIMEOUT_PUT_BOTTLE)
 
-                    
-                    # Post to a topic based on the user id
-                    mqttTopic = MQTT_BASE_TOPIC + str(userID)
-                    
-                    # More or less one second each 100 ml
-                    timeOn = round(fillVolume / PUMP_SPEED, 2)
-
+                # Post to a topic based on the user id
+                mqttTopic = MQTT_BASE_TOPIC + str(userID)
+                
+                # More or less one second each 100 ml
+                timeOn = round(fillVolume / PUMP_SPEED, 2)
+                
+                if waterType.lower() == TAP_WATER:
                     message = f"Tap water delivery started for {fillVolume} ml ({timeOn} seconds)"
                     logger.info(message)
                     client.publish(mqttTopic, payload=message, qos=1)
                     
-                    turn_on_water_pump_for(timeOn)
+                    turn_on_water_pump_for(GREEN_LED, GREEN_PUMP, timeOn)
 
                     message = f"Tap water delivery finished for {fillVolume} ml ({timeOn} seconds)"
+                    logger.info(message)
+                    client.publish(mqttTopic, payload=message, qos=1)
+                    
+                    #Inform Backend
+                    post_water_transaction(waterType, timeOn, False, bottleID, userID)
+
+                elif waterType.lower() == MINERAL_WATER:
+                    message = f"Mineral water delivery started for {fillVolume} ml ({timeOn} seconds)"
+                    logger.info(message)
+                    client.publish(mqttTopic, payload=message, qos=1)
+                    
+                    turn_on_water_pump_for(BLUE_LED, BLUE_PUMP, timeOn)
+
+                    message = f"Mineral water delivery finished for {fillVolume} ml ({timeOn} seconds)"
                     logger.info(message)
                     client.publish(mqttTopic, payload=message, qos=1)
                     
