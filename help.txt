@@ -1,0 +1,28 @@
+START Service
+1. Create a bash script that tries starting the station
+2. Create a service file that calls the bash script
+3. Copy the service file to /etc/systemd/system/
+    sudo cp /home/poseidon/refillstation/refill.service /etc/systemd/system/
+4. Enable service to start on boot
+    sudo systemctl enable refill.service
+5. Start service
+    sudo systemctl start refill.service
+
+
+STOP Service
+1. Stop Service
+    sudo systemctl stop refill.service
+2. Disable Service
+    sudo systemctl disable refill.service
+3. Remove service file
+    sudo rm /etc/systemd/system/refill.service
+4. Reload systemd:
+    sudo systemctl daemon-reload
+
+
+
+
+
+
+
+

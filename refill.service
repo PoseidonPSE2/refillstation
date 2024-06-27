@@ -1,0 +1,13 @@
+[Unit]
+Description=Your Python Program Service
+After=multi-user.target
+
+[Service]
+ExecStart=/home/poseidon/refillstation/run_refill.sh
+StandardOutput=syslog
+StandardError=syslog
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
